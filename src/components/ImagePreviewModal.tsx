@@ -15,6 +15,10 @@ export const ImagePreviewModal: React.FC<ImagePreviewModalProps> = ({
   if (!url) return null;
 
   const isPdf = title.toLowerCase().endsWith('.pdf');
+  // Blob = isi file asli dari endpoint /content (Surat Masuk) → render PDF
+  // sungguhan. URL eksternal (prototipe Surat Keluar) tetap perilaku lama.
+  const isBlob = url.startsWith('blob:');
+  const renderPdfAsli = isPdf && isBlob;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
@@ -55,14 +59,24 @@ export const ImagePreviewModal: React.FC<ImagePreviewModalProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-800">{title}</h3>
                 <p className="text-xs text-slate-500 mt-1 max-w-md">
-                  Dokumen pindaian resmi (Scan Dokumen PDF). Dalam implementasi nyata, berkas ini tersimpan di direktori server lokal kantor.
+                  {renderPdfAsli
+                    ? 'Pratinjau dokumen asli dari server (PDF).'
+                    : 'Dokumen pindaian resmi (Scan Dokumen PDF). Dalam implementasi nyata, berkas ini tersimpan di direktori server lokal kantor.'}
                 </p>
               </div>
-              <img 
-                src={url} 
-                alt={title} 
-                className="max-h-72 object-cover rounded-lg border border-slate-200 shadow-xs"
-              />
+              {renderPdfAsli ? (
+                <iframe
+                  src={url}
+                  title={title}
+                  className="w-full h-[60vh] rounded-lg border border-slate-200 shadow-xs bg-white"
+                />
+              ) : (
+                <img
+                  src={url}
+                  alt={title}
+                  className="max-h-72 object-cover rounded-lg border border-slate-200 shadow-xs"
+                />
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center">

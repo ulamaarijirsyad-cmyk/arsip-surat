@@ -46,9 +46,11 @@ export const SuratCard: React.FC<SuratCardProps> = ({
               {isMasuk ? 'SURAT MASUK' : 'SURAT KELUAR'}
             </span>
 
-            <span className="font-mono text-xs text-slate-500 font-semibold px-2 py-0.5 bg-slate-100 rounded">
-              {item.nomorAgenda}
-            </span>
+            {item.nomorAgenda && (
+              <span className="font-mono text-xs text-slate-500 font-semibold px-2 py-0.5 bg-slate-100 rounded">
+                {item.nomorAgenda}
+              </span>
+            )}
 
             <span className="text-[11px] font-medium text-slate-500 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
               {item.kategori}
@@ -133,14 +135,14 @@ export const SuratCard: React.FC<SuratCardProps> = ({
             </span>
             <div className="flex items-center gap-1 font-medium text-slate-800 mt-0.5 truncate">
               <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <span className="truncate">{item.tujuanSurat}</span>
+              <span className="truncate">{item.tujuanSurat || '—'}</span>
             </div>
           </div>
         </div>
 
         {/* Ringkasan Isi */}
         <p className="text-xs text-slate-600 line-clamp-2 mb-3 leading-relaxed">
-          {item.ringkasanIsi}
+          {item.ringkasanIsi || '—'}
         </p>
       </div>
 

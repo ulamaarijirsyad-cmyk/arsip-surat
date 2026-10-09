@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# File dokumen lokal (STORAGE_DIR ketika STORAGE_TYPE=local).
+# Hanya folder storage di ROOT proyek — source code (server/src/storage)
+# TIDAK terpengaruh karena pola di-anchoring ke root.
+/storage/
+/storage-local/

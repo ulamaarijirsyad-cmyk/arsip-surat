@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { 
   X, 
   Upload, 
@@ -10,16 +10,22 @@ import {
   Paperclip, 
   Image as ImageIcon,
   AlertCircle,
-  HelpCircle
+  HelpCircle,
+  Loader2
 } from 'lucide-react';
 import { JenisSurat, KategoriSurat, SuratItem, TipeTandaTangan, LampiranDokumen } from '../types';
+import { formatUkuranFile, validasiFileLampiran } from '../lib/documents';
 
 interface ModalTambahSuratProps {
   isOpen: boolean;
   onClose: () => void;
   defaultJenis: JenisSurat;
   items: SuratItem[];
-  onSave: (newItem: SuratItem) => void;
+  /**
+   * Simpan surat. Surat masuk dikirim ke API oleh App (boleh berupa
+   * Promise; error DILEMPAR agar pesannya tampil di modal, bukan crash).
+   */
+  onSave: (newItem: SuratItem) => void | Promise<void>;
 }
 
 export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
@@ -29,8 +35,7 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
   items,
   onSave
 }) => {
-  if (!isOpen) return null;
-
+  // Semua hook dideklarasikan SEBELUM conditional return (aturan React Hooks).
   const [jenis, setJenis] = useState<JenisSurat>(defaultJenis);
   
   // Calculate recommended agenda number
@@ -60,10 +65,23 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
     jenis === 'masuk' ? 'Ordner SM-09 / Rak Dokumen A1' : 'Buku Arsip Surat Keluar Non-TTE 2026'
   );
   const [instruksiDisposisi, setInstruksiDisposisi] = useState('');
+  // Sifat surat — wajib diisi untuk surat masuk (kolom NOT NULL di API).
+  const [sifatSurat, setSifatSurat] = useState<'Biasa' | 'Penting' | 'Segera'>('Biasa');
 
   // Uploaded files
   const [lampiranList, setLampiranList] = useState<LampiranDokumen[]>([]);
   const [simulatedFileName, setSimulatedFileName] = useState('');
+  // Pesan validasi awal pemilihan file (tipe/ukuran) — server tetap final.
+  const [fileError, setFileError] = useState('');
+
+  // Status penyimpanan (mencegah double-submit & menampilkan error API).
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  // Guard SINKRON: state React baru ter-commit setelah handler selesai,
+  // sehingga klik ganda dalam satu task JS yang sama diblokir oleh ref ini.
+  const savingRef = useRef(false);
+
+  if (!isOpen) return null;
 
   const handleSimulateAddAttachment = (type: 'pdf' | 'gambar') => {
     const filename = simulatedFileName.trim() 
@@ -88,23 +106,60 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
   };
 
   const handleFileDrop = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const file = e.target.files[0];
-      const isPdf = file.name.toLowerCase().endsWith('.pdf');
+    const file = e.target.files?.[0];
+    e.target.value = ''; // izinkan memilih file yang sama lagi
+    if (!file) return;
+
+    if (jenis === 'masuk') {
+      // Surat Masuk: staging berkas ASLI untuk diunggah App setelah surat
+      // tersimpan dan memiliki ID. Tanpa URL placeholder.
+      const galat = validasiFileLampiran(file);
+      if (galat) {
+        setFileError(galat);
+        return;
+      }
+      setFileError('');
+      const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
       const newAtt: LampiranDokumen = {
         id: `att-${Date.now()}`,
         namaFile: file.name,
-        ukuran: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+        ukuran: formatUkuranFile(file.size),
         tipe: isPdf ? 'pdf' : 'gambar',
-        url: 'https://images.unsplash.com/photo-1568667256549-094345857637?auto=format&fit=crop&w=800&q=80',
-        tanggalUpload: todayStr
+        url: '', // pratinjau menembus endpoint /content — bukan URL langsung
+        tanggalUpload: todayStr,
+        file
       };
       setLampiranList([...lampiranList, newAtt]);
+      return;
     }
+
+    // Surat Keluar: perilaku prototipe LAMA dipertahankan apa adanya
+    // (backend untuk surat keluar belum ada — di luar scope phase ini).
+    const isPdf = file.name.toLowerCase().endsWith('.pdf');
+    const newAtt: LampiranDokumen = {
+      id: `att-${Date.now()}`,
+      namaFile: file.name,
+      ukuran: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+      tipe: isPdf ? 'pdf' : 'gambar',
+      url: 'https://images.unsplash.com/photo-1568667256549-094345857637?auto=format&fit=crop&w=800&q=80',
+      tanggalUpload: todayStr
+    };
+    setLampiranList([...lampiranList, newAtt]);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  /**
+   * Tutup modal sambil membuang staging lampiran — mencegah berkas lama
+   * tidak sengaja terunggah ke surat berikutnya yang dibuka.
+   */
+  const handleClose = () => {
+    setLampiranList([]);
+    setFileError('');
+    onClose();
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving || savingRef.current) return;
 
     if (!nomorSurat.trim() || !perihal.trim()) {
       alert('Mohon isi Nomor Surat dan Perihal terlebih dahulu.');
@@ -123,11 +178,13 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
       perihal: perihal.trim(),
       ringkasanIsi: ringkasanIsi.trim() || perihal.trim(),
       kategori,
+      sifatSurat: jenis === 'masuk' ? sifatSurat : undefined,
       tipeTandaTangan: jenis === 'keluar' ? tipeTandaTangan : undefined,
       penandatangan: jenis === 'keluar' ? penandatangan : undefined,
       statusDisposisi: jenis === 'masuk' ? (instruksiDisposisi ? 'Diteruskan ke Seksi/Staf' : 'Belum Didisposisi') : undefined,
       sumberAsal: jenis === 'keluar' && tipeTandaTangan === 'Manual / Basah' ? 'Manual Bagian' : 'SRIKANDI (Disalin)',
       lokasiFisikBuku,
+      apiSource: jenis === 'masuk',
       disposisi: jenis === 'masuk' && instruksiDisposisi ? [
         {
           id: `disp-${Date.now()}`,
@@ -138,20 +195,37 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
           sudahDibaca: false
         }
       ] : [],
-      lampiran: lampiranList.length > 0 ? lampiranList : [
-        {
-          id: `att-default-${Date.now()}`,
-          namaFile: `dokumen_${jenis === 'masuk' ? 'masuk' : 'keluar_manual'}_arsip.pdf`,
-          ukuran: '850 KB',
-          tipe: 'pdf',
-          url: 'https://images.unsplash.com/photo-1586281380349-632531db7ed4?auto=format&fit=crop&w=800&q=80',
-          tanggalUpload: todayStr
-        }
-      ]
+      lampiran: jenis === 'masuk'
+        // Surat Masuk: daftar berkas asli menunggu diunggah App SETELAH surat
+        // tersimpan (bukan data palsu; server adalah sumber kebenaran).
+        ? lampiranList
+        // Surat Keluar: prototipe lokal dipertahankan seperti sebelumnya.
+        : lampiranList.length > 0 ? lampiranList : [
+          {
+            id: `att-default-${Date.now()}`,
+            namaFile: `dokumen_${jenis === 'masuk' ? 'masuk' : 'keluar_manual'}_arsip.pdf`,
+            ukuran: '850 KB',
+            tipe: 'pdf',
+            url: 'https://images.unsplash.com/photo-1586281380349-632531db7ed4?auto=format&fit=crop&w=800&q=80',
+            tanggalUpload: todayStr
+          }
+        ]
     };
 
-    onSave(newItem);
-    onClose();
+    // Surat masuk: App mengirim ke API (POST /api/surat-masuk) — bila gagal,
+    // error dilempar ke sini agar ditampilkan sebagai pesan ramah di modal.
+    try {
+      savingRef.current = true;
+      setIsSaving(true);
+      setSaveError('');
+      await onSave(newItem);
+      handleClose();
+    } catch (err) {
+      setSaveError(err instanceof Error && err.message ? err.message : 'Gagal menyimpan. Silakan coba lagi.');
+    } finally {
+      savingRef.current = false;
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -176,7 +250,7 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
             </div>
           </div>
           <button 
-            onClick={onClose}
+            onClick={handleClose}
             className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -194,6 +268,9 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
                 setJenis('masuk');
                 setAsalPengirim('');
                 setTujuanSurat('Kepala Kantor (Bpk. Rudito)');
+                // Staging lampiran tidak boleh bercampur antar jenis surat.
+                setLampiranList([]);
+                setFileError('');
               }}
               className={`flex-1 py-1.5 rounded-md font-semibold text-xs flex items-center justify-center gap-2 transition-all ${
                 jenis === 'masuk' ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600'
@@ -208,6 +285,8 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
                 setJenis('keluar');
                 setAsalPengirim('Subbag Tata Usaha / Bapenda');
                 setTujuanSurat('');
+                setLampiranList([]);
+                setFileError('');
               }}
               className={`flex-1 py-1.5 rounded-md font-semibold text-xs flex items-center justify-center gap-2 transition-all ${
                 jenis === 'keluar' ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600'
@@ -414,6 +493,23 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
                 className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-slate-700 text-xs"
                 placeholder="Ordner SM-09"
               />
+
+              {jenis === 'masuk' && (
+                <>
+                  <label className="block font-semibold text-slate-800 mt-2 mb-1">
+                    Sifat Surat <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={sifatSurat}
+                    onChange={(e) => setSifatSurat(e.target.value as 'Biasa' | 'Penting' | 'Segera')}
+                    className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="Biasa">Biasa</option>
+                    <option value="Penting">Penting</option>
+                    <option value="Segera">Segera</option>
+                  </select>
+                </>
+              )}
             </div>
           </div>
 
@@ -444,9 +540,18 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
                 Unggah Berkas Scan / Foto Fisik Surat
               </label>
               <span className="text-[11px] text-slate-400">
-                Mendukung PDF & Gambar (Foto Kamera HP / Scanner)
+                {jenis === 'masuk'
+                  ? 'Maks. 5 MB per file • PDF, JPG/JPEG, PNG'
+                  : 'Mendukung PDF & Gambar (Foto Kamera HP / Scanner)'}
               </span>
             </div>
+
+            {jenis === 'masuk' && fileError && (
+              <div className="flex items-start gap-2 px-3 py-2 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span>{fileError}</span>
+              </div>
+            )}
 
             {/* List existing attached files */}
             {lampiranList.length > 0 && (
@@ -474,61 +579,96 @@ export const ModalTambahSurat: React.FC<ModalTambahSuratProps> = ({
               </div>
             )}
 
-            {/* Simulated fast attachment buttons */}
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <input
-                type="file"
-                id="file-upload-input"
-                onChange={handleFileDrop}
-                className="hidden"
-                accept=".pdf,image/*"
-              />
-              <label
-                htmlFor="file-upload-input"
-                className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-slate-700 font-medium transition-colors"
-              >
-                <Upload className="w-3.5 h-3.5 text-slate-500" />
-                Pilih Berkas dari PC
-              </label>
+            {/* Tombol simulasi HANYA untuk Surat Keluar (prototipe lokal);
+                Surat Masuk memakai unggah file sungguhan di atas. */}
+            {jenis === 'keluar' && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <input
+                  type="file"
+                  id="file-upload-input"
+                  onChange={handleFileDrop}
+                  className="hidden"
+                  accept=".pdf,image/*"
+                />
+                <label
+                  htmlFor="file-upload-input"
+                  className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-slate-700 font-medium transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5 text-slate-500" />
+                  Pilih Berkas dari PC
+                </label>
 
-              <button
-                type="button"
-                onClick={() => handleSimulateAddAttachment('pdf')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors text-[11px]"
-              >
-                <FileText className="w-3 h-3 text-rose-600" />
-                + Simulasi Scan PDF
-              </button>
+                <button
+                  type="button"
+                  onClick={() => handleSimulateAddAttachment('pdf')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors text-[11px]"
+                >
+                  <FileText className="w-3 h-3 text-rose-600" />
+                  + Simulasi Scan PDF
+                </button>
 
-              <button
-                type="button"
-                onClick={() => handleSimulateAddAttachment('gambar')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors text-[11px]"
-              >
-                <ImageIcon className="w-3 h-3 text-blue-600" />
-                + Simulasi Foto Berkas Fisik
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => handleSimulateAddAttachment('gambar')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors text-[11px]"
+                >
+                  <ImageIcon className="w-3 h-3 text-blue-600" />
+                  + Simulasi Foto Berkas Fisik
+                </button>
+              </div>
+            )}
+
+            {jenis === 'masuk' && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <input
+                  type="file"
+                  id="file-upload-input-masuk"
+                  onChange={handleFileDrop}
+                  className="hidden"
+                  accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                />
+                <label
+                  htmlFor="file-upload-input-masuk"
+                  className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-slate-700 font-medium transition-colors"
+                >
+                  <Upload className="w-3.5 h-3.5 text-slate-500" />
+                  Pilih Berkas dari PC
+                </label>
+                <span className="text-[11px] text-slate-400">
+                  File diunggah ke server setelah surat berhasil disimpan.
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Action Buttons */}
-          <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-            >
-              Batal
-            </button>
-            <button
-              type="submit"
-              className={`px-5 py-2 text-xs font-semibold text-white rounded-lg transition-all shadow-xs flex items-center gap-1.5 ${
-                jenis === 'masuk' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-indigo-600 hover:bg-indigo-700'
-              }`}
-            >
-              <Check className="w-3.5 h-3.5" />
-              Simpan ke Arsip Lokal
-            </button>
+          <div className="pt-3 border-t border-slate-200 space-y-2">
+            {saveError && (
+              <div className="flex items-start gap-2 px-3 py-2 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span>{saveError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleClose}
+                disabled={isSaving}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors disabled:opacity-60"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving}
+                className={`px-5 py-2 text-xs font-semibold text-white rounded-lg transition-all shadow-xs flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed ${
+                  jenis === 'masuk' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-indigo-600 hover:bg-indigo-700'
+                }`}
+              >
+                {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                {isSaving ? 'Menyimpan...' : 'Simpan ke Arsip Lokal'}
+              </button>
+            </div>
           </div>
         </form>
       </div>

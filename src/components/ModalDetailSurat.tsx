@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   X, 
   FileText, 
@@ -15,30 +15,157 @@ import {
   FileCheck,
   SendHorizontal,
   Download,
-  Eye
+  Eye,
+  Loader2,
+  AlertTriangle,
+  Trash2
 } from 'lucide-react';
-import { SuratItem, DisposisiLog } from '../types';
+import { SuratItem, DisposisiLog, LampiranDokumen } from '../types';
+import { ApiError } from '../lib/api';
+import {
+  fetchBlobLampiran,
+  fetchDaftarLampiran,
+  hapusLampiran,
+  labelTipeFile,
+  mapLampiranApiToItem
+} from '../lib/documents';
 
 interface ModalDetailSuratProps {
   item: SuratItem | null;
   onClose: () => void;
   onAddDisposisi: (suratId: string, disposisi: DisposisiLog) => void;
   onPreviewLampiranUrl: (url: string, title: string) => void;
+  /** true saat mengambil detail terbaru dari API (GET /:id). */
+  isLoading?: boolean;
+  /** Pesan gagal memuat detail (ramah pengguna, dari ApiError). */
+  error?: string;
+  onRetry?: () => void;
+  /**
+   * true bila role user saat ini boleh menghapus lampiran (admin/petugas).
+   * Penyembunyian tombol BUKAN keamanan — backend tetap memeriksa role.
+   */
+  canManageLampiran?: boolean;
 }
 
 export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
   item,
   onClose,
   onAddDisposisi,
-  onPreviewLampiranUrl
+  onPreviewLampiranUrl,
+  isLoading = false,
+  error = '',
+  onRetry,
+  canManageLampiran = false
 }) => {
-  if (!item) return null;
-
-  const isMasuk = item.jenis === 'masuk';
-
+  // Semua hook dideklarasikan SEBELUM conditional return agar jumlah
+  // hook stabil antar render (mengikuti aturan React Hooks).
   const [kepada, setKepada] = useState('');
   const [instruksi, setInstruksi] = useState('');
   const [catatan, setCatatan] = useState('');
+
+  // ---- Lampiran dokumen (Phase 2E-3): daftar dari API, hanya Surat Masuk ----
+  const [daftarLampiran, setDaftarLampiran] = useState<LampiranDokumen[] | null>(null);
+  const [lampiranLoading, setLampiranLoading] = useState(false);
+  const [lampiranError, setLampiranError] = useState('');
+  const [aksiBusyId, setAksiBusyId] = useState<string | null>(null);
+  const [aksiError, setAksiError] = useState('');
+  const lampiranSeqRef = useRef(0);
+
+  /**
+   * Muat daftar lampiran dari backend — HANYA untuk Surat Masuk dari API.
+   * Surat Keluar (prototipe lokal) tetap memakai item.lampiran tanpa request.
+   * Guard `seq` membuat respons basi (modal ditutup/ganti) diabaikan.
+   */
+  const loadLampiran = (target: SuratItem | null) => {
+    const seq = ++lampiranSeqRef.current;
+    setDaftarLampiran(null);
+    setLampiranError('');
+    setAksiError('');
+    setAksiBusyId(null); // aksi lama milik surat sebelumnya tidak berlaku lagi
+    if (!target || target.jenis !== 'masuk' || !target.apiSource) {
+      setLampiranLoading(false);
+      return;
+    }
+    setLampiranLoading(true);
+    fetchDaftarLampiran(target.id)
+      .then(list => {
+        if (seq !== lampiranSeqRef.current) return;
+        setDaftarLampiran(list.map(mapLampiranApiToItem));
+        setLampiranLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (seq !== lampiranSeqRef.current) return;
+        setDaftarLampiran(null);
+        setLampiranLoading(false);
+        setLampiranError(err instanceof ApiError ? err.message : 'Gagal memuat daftar lampiran.');
+      });
+  };
+
+  useEffect(() => {
+    loadLampiran(item);
+    return () => {
+      lampiranSeqRef.current++; // request melayang jadi basi saat ganti/unmount
+    };
+    // Muat ulang hanya bila surat yang dituju berganti (bukan sekadar object baru).
+  }, [item?.id, item?.jenis, item?.apiSource]);
+
+  /** Pratinjau: ambil byte dari /content → object URL (dicabut App saat tutup). */
+  const handlePreviewLampiranApi = async (att: LampiranDokumen) => {
+    setAksiBusyId(att.id);
+    setAksiError('');
+    try {
+      const blob = await fetchBlobLampiran(Number(att.id), 'content');
+      onPreviewLampiranUrl(URL.createObjectURL(blob), att.namaFile);
+    } catch (err) {
+      setAksiError(err instanceof ApiError ? err.message : 'Gagal memuat pratinjau lampiran.');
+    } finally {
+      setAksiBusyId(null);
+    }
+  };
+
+  /** Unduh: ambil byte dari /download → object URL + <a download>. */
+  const handleUnduhLampiranApi = async (att: LampiranDokumen) => {
+    setAksiBusyId(att.id);
+    setAksiError('');
+    try {
+      const blob = await fetchBlobLampiran(Number(att.id), 'download');
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = att.namaFile; // nama asli dari metadata server
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      // Cabut object URL setelah browser sempat memulai unduhan (batas 30 dtk)
+      // agar tidak menumpuk di memori.
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (err) {
+      setAksiError(err instanceof ApiError ? err.message : 'Gagal mengunduh lampiran.');
+    } finally {
+      setAksiBusyId(null);
+    }
+  };
+
+  /** Hapus lampiran (soft delete di server) → daftar dimuat ulang. */
+  const handleHapusLampiranApi = async (att: LampiranDokumen) => {
+    if (!window.confirm(`Hapus lampiran "${att.namaFile}"?`)) return;
+    setAksiBusyId(att.id);
+    setAksiError('');
+    try {
+      await hapusLampiran(Number(att.id));
+      loadLampiran(item); // segarkan daftar setelah hapus berhasil
+    } catch (err) {
+      setAksiError(err instanceof ApiError ? err.message : 'Gagal menghapus lampiran.');
+    } finally {
+      setAksiBusyId(null);
+    }
+  };
+
+  if (!item) return null;
+
+  const isMasuk = item.jenis === 'masuk';
+  /** Daftar yang ditampilkan: API untuk Surat Masuk, lokal untuk Surat Keluar. */
+  const daftarTampil: LampiranDokumen[] = isMasuk ? (daftarLampiran ?? []) : item.lampiran;
 
   const handleKirimDisposisi = (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,9 +204,11 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-mono text-xs font-bold text-slate-700 bg-slate-200/80 px-2 py-0.5 rounded">
-                  {item.nomorAgenda}
-                </span>
+                {item.nomorAgenda && (
+                  <span className="font-mono text-xs font-bold text-slate-700 bg-slate-200/80 px-2 py-0.5 rounded">
+                    {item.nomorAgenda}
+                  </span>
+                )}
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   {isMasuk ? 'Arsip Surat Masuk' : 'Arsip Surat Keluar'}
                 </span>
@@ -98,6 +227,29 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
         </div>
 
         {/* Content Body */}
+        {isLoading ? (
+          <div className="p-6 overflow-y-auto">
+            <div className="flex flex-col items-center justify-center py-10 text-center space-y-3">
+              <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
+              <p className="text-xs font-semibold text-slate-600">Memuat detail surat...</p>
+            </div>
+          </div>
+        ) : error ? (
+          <div className="p-6 overflow-y-auto">
+            <div className="flex flex-col items-center justify-center py-10 text-center space-y-3">
+              <AlertTriangle className="w-6 h-6 text-rose-500" />
+              <p className="text-xs font-semibold text-slate-700">{error}</p>
+              {onRetry && (
+                <button
+                  onClick={onRetry}
+                  className="px-4 py-2 bg-blue-50 text-blue-600 font-semibold text-xs rounded-lg hover:bg-blue-100 transition-colors"
+                >
+                  Coba lagi
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
         <div className="p-6 overflow-y-auto space-y-6 text-xs text-slate-700">
           
           {/* Main Title & Perihal */}
@@ -109,7 +261,7 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
               {item.perihal}
             </h1>
             <p className="text-xs text-slate-600 mt-2 leading-relaxed">
-              {item.ringkasanIsi}
+              {item.ringkasanIsi || '—'}
             </p>
           </div>
 
@@ -142,6 +294,12 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
                 </span>
               )}
             </div>
+            {item.penandatangan && (
+              <div>
+                <span className="text-[10px] text-slate-400 font-bold uppercase block">Penandatangan</span>
+                <span className="font-semibold text-slate-800 text-xs mt-0.5 block">{item.penandatangan}</span>
+              </div>
+            )}
           </div>
 
           {/* Asal & Tujuan */}
@@ -162,7 +320,7 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
               </span>
               <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
                 <User className="w-4 h-4 text-slate-500 shrink-0" />
-                <span>{item.tujuanSurat}</span>
+                <span>{item.tujuanSurat || '—'}</span>
               </div>
             </div>
           </div>
@@ -184,57 +342,115 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
                 Berkas Lampiran Digital (Scan / Foto Surat)
               </h4>
               <span className="text-[11px] text-slate-400">
-                {item.lampiran.length} file tersimpan
+                {isMasuk && lampiranLoading ? 'Memuat...' : `${daftarTampil.length} file tersimpan`}
               </span>
             </div>
 
-            {item.lampiran.length === 0 ? (
+            {/* Galat aksi lampiran (pratinjau/unduh/hapus) — pesan ramah */}
+            {aksiError && (
+              <div className="flex items-start gap-2 px-3 py-2 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span>{aksiError}</span>
+              </div>
+            )}
+
+            {isMasuk && lampiranLoading ? (
+              <div className="flex items-center justify-center py-6 text-slate-500">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                <span className="text-xs">Memuat lampiran...</span>
+              </div>
+            ) : isMasuk && lampiranError ? (
+              <div className="flex flex-col items-center gap-2 py-5 text-center">
+                <p className="text-xs text-rose-600">{lampiranError}</p>
+                <button
+                  onClick={() => loadLampiran(item)}
+                  className="px-4 py-2 bg-blue-50 text-blue-600 font-semibold text-xs rounded-lg hover:bg-blue-100 transition-colors"
+                >
+                  Coba lagi
+                </button>
+              </div>
+            ) : daftarTampil.length === 0 ? (
               <p className="text-xs text-slate-400 italic">Tidak ada berkas yang diunggah.</p>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {item.lampiran.map((att) => (
-                  <div 
-                    key={att.id}
-                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-col justify-between gap-3 hover:bg-slate-100/80 transition-colors"
-                  >
-                    <div className="flex items-start gap-2.5">
-                      <div className="w-8 h-8 rounded bg-white border border-slate-200 flex items-center justify-center shrink-0">
-                        {att.tipe === 'pdf' ? (
-                          <FileText className="w-4 h-4 text-rose-500" />
+                {daftarTampil.map((att) => {
+                  const busy = aksiBusyId === att.id;
+                  return (
+                    <div
+                      key={att.id}
+                      className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-col justify-between gap-3 hover:bg-slate-100/80 transition-colors"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <div className="w-8 h-8 rounded bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                          {att.tipe === 'pdf' ? (
+                            <FileText className="w-4 h-4 text-rose-500" />
+                          ) : (
+                            <ExternalLink className="w-4 h-4 text-blue-500" />
+                          )}
+                        </div>
+                        <div className="overflow-hidden">
+                          <span className="font-semibold text-slate-800 text-xs block truncate" title={att.namaFile}>
+                            {att.namaFile}
+                          </span>
+                          <span className="text-[11px] text-slate-400">
+                            {labelTipeFile(att.namaFile, att.tipe)} • {att.ukuran}
+                            {isMasuk && att.tanggalUpload ? ` • ${att.tanggalUpload}` : ''}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2 border-t border-slate-200/80">
+                        <button
+                          onClick={() =>
+                            isMasuk
+                              ? handlePreviewLampiranApi(att)
+                              : onPreviewLampiranUrl(att.url, att.namaFile)
+                          }
+                          disabled={busy}
+                          className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs rounded flex items-center justify-center gap-1 transition-colors disabled:opacity-60"
+                        >
+                          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
+                          <span>Pratinjau</span>
+                        </button>
+
+                        {isMasuk ? (
+                          <>
+                            {/* Unduh isi file dari endpoint /download */}
+                            <button
+                              onClick={() => handleUnduhLampiranApi(att)}
+                              disabled={busy}
+                              className="p-1.5 bg-white hover:bg-slate-200 border border-slate-200 text-slate-700 rounded transition-colors disabled:opacity-60"
+                              title="Unduh file"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+                            {/* Hapus hanya untuk role tulis; backend tetap memutuskan. */}
+                            {canManageLampiran && (
+                              <button
+                                onClick={() => handleHapusLampiranApi(att)}
+                                disabled={busy}
+                                className="p-1.5 bg-white hover:bg-rose-50 border border-slate-200 text-rose-600 rounded transition-colors disabled:opacity-60"
+                                title="Hapus lampiran"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </>
                         ) : (
-                          <ExternalLink className="w-4 h-4 text-blue-500" />
+                          <a
+                            href={att.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 bg-white hover:bg-slate-200 border border-slate-200 text-slate-700 rounded transition-colors"
+                            title="Buka tab baru"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </a>
                         )}
                       </div>
-                      <div className="overflow-hidden">
-                        <span className="font-semibold text-slate-800 text-xs block truncate" title={att.namaFile}>
-                          {att.namaFile}
-                        </span>
-                        <span className="text-[11px] text-slate-400">
-                          {att.tipe.toUpperCase()} • {att.ukuran}
-                        </span>
-                      </div>
                     </div>
-
-                    <div className="flex items-center gap-2 pt-2 border-t border-slate-200/80">
-                      <button
-                        onClick={() => onPreviewLampiranUrl(att.url, att.namaFile)}
-                        className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs rounded flex items-center justify-center gap-1 transition-colors"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>Pratinjau</span>
-                      </button>
-                      <a
-                        href={att.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="p-1.5 bg-white hover:bg-slate-200 border border-slate-200 text-slate-700 rounded transition-colors"
-                        title="Buka tab baru"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </a>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -329,6 +545,7 @@ export const ModalDetailSurat: React.FC<ModalDetailSuratProps> = ({
             </div>
           )}
         </div>
+        )}
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-slate-200 flex items-center justify-between bg-slate-50 rounded-b-2xl">

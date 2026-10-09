@@ -8,15 +8,24 @@ import {
   Server, 
   ShieldCheck,
   Building2,
-  Plus
+  Plus,
+  User,
+  LogOut
 } from 'lucide-react';
-import { SuratItem } from '../types';
+import { SuratItem, AuthUser } from '../types';
 import { exportToCSV } from '../mockData';
 
 interface HeaderProps {
   activeTab: 'semua' | 'masuk' | 'keluar';
   setActiveTab: (tab: 'semua' | 'masuk' | 'keluar') => void;
   items: SuratItem[];
+  /** Total surat masuk dari server (ikut filter/pagination aktif). */
+  masukCount: number;
+  /** false → sembunyikan tombol tulis (pimpinan). UI hiding ≠ keamanan. */
+  canWrite: boolean;
+  /** User login dari GET /api/auth/me (null = belum login). */
+  user: AuthUser | null;
+  onLogout: () => void;
   onOpenTambahModal: (jenis: 'masuk' | 'keluar') => void;
   onOpenRancanganModal: () => void;
 }
@@ -25,10 +34,14 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
   items,
+  masukCount,
+  canWrite,
+  user,
+  onLogout,
   onOpenTambahModal,
   onOpenRancanganModal,
 }) => {
-  const countMasuk = items.filter(i => i.jenis === 'masuk').length;
+  const countMasuk = masukCount;
   const countKeluar = items.filter(i => i.jenis === 'keluar').length;
   const countNonTTE = items.filter(i => i.jenis === 'keluar' && i.tipeTandaTangan === 'Manual / Basah').length;
 
@@ -51,6 +64,27 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
           <span className="text-slate-600">•</span>
           <span className="text-slate-400 text-[11px]">Kompatibel Lampiran SRIKANDI & Non-TTE</span>
+          {user && (
+            <>
+              <span className="text-slate-600">•</span>
+              <span className="inline-flex items-center gap-1.5" title={`Masuk sebagai ${user.username}`}>
+                <User className="w-3.5 h-3.5 text-blue-400" />
+                <span className="font-medium text-white">{user.full_name || user.username}</span>
+                <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 text-[10px] font-semibold uppercase tracking-wide">
+                  {user.role}
+                </span>
+              </span>
+              <button
+                id="btn-logout"
+                onClick={onLogout}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-300 hover:text-white underline underline-offset-2 transition-colors"
+                title="Keluar dari sesi login"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Keluar
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -97,24 +131,26 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Ekspor Excel</span>
           </button>
 
-          <div className="flex items-center gap-1.5 pl-1">
-            <button
-              id="btn-tambah-surat-masuk"
-              onClick={() => onOpenTambahModal('masuk')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>+ Surat Masuk</span>
-            </button>
-            <button
-              id="btn-tambah-surat-keluar"
-              onClick={() => onOpenTambahModal('keluar')}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>+ Surat Keluar</span>
-            </button>
-          </div>
+          {canWrite && (
+            <div className="flex items-center gap-1.5 pl-1">
+              <button
+                id="btn-tambah-surat-masuk"
+                onClick={() => onOpenTambahModal('masuk')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Surat Masuk</span>
+              </button>
+              <button
+                id="btn-tambah-surat-keluar"
+                onClick={() => onOpenTambahModal('keluar')}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Surat Keluar</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -130,7 +166,7 @@ export const Header: React.FC<HeaderProps> = ({
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            Semua Surat ({items.length})
+            Semua Surat ({countMasuk + countKeluar})
           </button>
 
           <button
